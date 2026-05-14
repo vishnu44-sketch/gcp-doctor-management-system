@@ -1,0 +1,32 @@
+# Virtual Environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs
+logs/
+*.log
+
+# Config / Secrets
+config/*.json
+config/*.yaml
+config/*.yml
+
+# VS Code
+.vscode/
+
+# System files
+.DS_Store
+Thumbs.db
+
+venv/
+__pycache__/
+*.pyc
+logs/*.log
+config/*.json
+config/*.yaml
+config/*.yml
+.env
+.vscode/
