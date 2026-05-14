@@ -10,6 +10,9 @@ This works in Sandbox but is only suitable for small tables.
 """
 
 import logging
+import random
+from datetime import datetime, timezone
+
 import pandas as pd
 from google.cloud import bigquery
 
@@ -124,9 +127,8 @@ def add_doctor(client: bigquery.Client, table_id: str, doctor: dict) -> int:
     df = pd.DataFrame([doctor])
 
     # Ensure proper data types
-    # Ensure proper data types
-    df["experience_years"] = df["experience_years"].astype("int64")
-    df["phone"] = df["phone"].astype("int64")
+    df["experience_years"] = df["experience_years"].astype(int)
+    df["phone"] = df["phone"].astype(int)
 
     # Step 4: Load into BigQuery (WRITE_APPEND mode)
     logger.info(f"Inserting doctor {doctor['doctor_id']} into BigQuery")
@@ -190,9 +192,8 @@ def update_doctor(client: bigquery.Client, table_id: str,
         logger.info(f"  {field} -> {new_value}")
 
     # Step 4: Ensure correct types after modification
-    # Step 4: Ensure correct types after modification
-    df["experience_years"] = df["experience_years"].astype("int64")
-    df["phone"] = df["phone"].astype("int64")
+    df["experience_years"] = df["experience_years"].astype(int)
+    df["phone"] = df["phone"].astype(int)
 
     # Step 5: Rewrite the entire table
     logger.info(f"Rewriting table with updated data ({len(df)} rows)")
@@ -219,3 +220,131 @@ def get_doctor_count(client: bigquery.Client, table_id: str) -> int:
     for row in result:
         return row.cnt
     return 0
+
+
+# -----------------------------------------------------------
+# Pipeline Operations (for the automated cron job)
+# -----------------------------------------------------------
+
+# Sample data pools for generating random doctors
+_FIRST_NAMES = ["Arjun", "Priya", "Karthik", "Deepa", "Suresh", "Lakshmi",
+                "Vikram", "Anjali", "Rahul", "Sneha", "Ganesh", "Pooja"]
+_SPECIALIZATIONS = ["Cardiology", "Neurology", "Orthopedics", "Pediatrics",
+                    "Dermatology", "Oncology", "Radiology", "Psychiatry"]
+_QUALIFICATIONS = ["MBBS, MD", "MBBS, MS", "MBBS, DM", "MBBS, DNB"]
+_HOSPITALS = ["Apollo Hospital", "Fortis Hospital", "Manipal Hospital",
+              "Max Hospital", "Columbia Asia", "Narayana Health"]
+_CITIES = ["Chennai", "Bangalore", "Mumbai", "Delhi", "Hyderabad", "Pune"]
+
+
+def generate_random_doctor(client: bigquery.Client, table_id: str) -> dict:
+    """
+    Generate a random doctor record with a unique doctor_id and
+    a created_at timestamp set to the current UTC time.
+
+    The doctor_id is built from the current count + a random suffix
+    to reduce the chance of collisions.
+
+    Args:
+        client: BigQuery client instance.
+        table_id: Fully qualified table ID.
+
+    Returns:
+        Dictionary representing a new doctor record.
+    """
+    # Build a reasonably unique ID
+    count = get_doctor_count(client, table_id)
+    unique_num = count + random.randint(1000, 9999)
+    doctor_id = f"D{unique_num}"
+
+    first = random.choice(_FIRST_NAMES)
+    doctor = {
+        "doctor_id": doctor_id,
+        "name": f"Dr. {first}",
+        "specialization": random.choice(_SPECIALIZATIONS),
+        "qualification": random.choice(_QUALIFICATIONS),
+        "hospital": random.choice(_HOSPITALS),
+        "city": random.choice(_CITIES),
+        "experience_years": random.randint(1, 35),
+        "email": f"{first.lower()}{random.randint(1, 999)}@hospital.com",
+        "phone": random.randint(9000000000, 9999999999),
+        "created_at": datetime.now(timezone.utc),
+    }
+
+    logger.info(f"Generated random doctor: {doctor_id}")
+    return doctor
+
+
+def insert_doctor_with_timestamp(client: bigquery.Client, table_id: str,
+                                 doctor: dict) -> int:
+    """
+    Insert a doctor record that already includes a 'created_at' field.
+
+    Unlike add_doctor(), this does NOT validate or check duplicates -
+    it is meant for the automated pipeline inserting generated data.
+
+    Args:
+        client: BigQuery client instance.
+        table_id: Fully qualified table ID.
+        doctor: Dictionary with doctor fields (including created_at).
+
+    Returns:
+        Number of rows inserted.
+    """
+    df = pd.DataFrame([doctor])
+
+    # Ensure correct data types
+    df["experience_years"] = df["experience_years"].astype("int64")
+    df["phone"] = df["phone"].astype("int64")
+    df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
+
+    logger.info(f"Inserting generated doctor {doctor['doctor_id']} into BigQuery")
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+
+    try:
+        job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
+        job.result()
+        logger.info(f"Inserted {job.output_rows} generated row(s)")
+        return job.output_rows
+    except Exception as e:
+        logger.error(f"Failed to insert generated doctor: {e}")
+        raise
+
+
+def get_doctors_since(client: bigquery.Client, table_id: str,
+                      since_timestamp: str) -> pd.DataFrame:
+    """
+    Fetch all doctor rows created AFTER the given timestamp.
+    This is the core of incremental loading - only NEW rows are returned.
+
+    Args:
+        client: BigQuery client instance.
+        table_id: Fully qualified table ID.
+        since_timestamp: Timestamp string 'YYYY-MM-DD HH:MM:SS' (UTC).
+
+    Returns:
+        DataFrame with rows where created_at > since_timestamp.
+    """
+    logger.info(f"Fetching doctors created after: {since_timestamp}")
+
+    query = f"""
+        SELECT * FROM `{table_id}`
+        WHERE created_at > TIMESTAMP(@since_ts)
+        ORDER BY created_at
+    """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter(
+                "since_ts", "TIMESTAMP", since_timestamp
+            )
+        ]
+    )
+
+    try:
+        df = client.query(query, job_config=job_config).to_dataframe()
+        logger.info(f"Found {len(df)} new row(s) since last run")
+        return df
+    except Exception as e:
+        logger.error(f"Failed to fetch incremental rows: {e}")
+        raise

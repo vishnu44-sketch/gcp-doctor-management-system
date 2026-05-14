@@ -173,7 +173,7 @@ def main():
 
     # Step 3: Connect to BigQuery
     try:
-        client = get_bigquery_client(config)
+        client = get_bigquery_client(config["bigquery"]["project_id"])
         table_id = get_table_id(config)
         logger.info(f"Connected to BigQuery. Table: {table_id}")
     except Exception as e:
@@ -209,7 +209,6 @@ def main():
             print("\nInvalid choice. Please enter 1-6.")
 
         input("\nPress Enter to continue...")
-
 
 if __name__ == "__main__":
     main()
